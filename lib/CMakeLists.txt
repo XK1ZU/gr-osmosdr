@@ -255,6 +255,14 @@ GR_INCLUDE_SUBDIRECTORY(freesrp)
 endif(ENABLE_FREESRP)
 
 ########################################################################
+# Setup PCIeSDR component
+########################################################################
+GR_REGISTER_COMPONENT("PCIeSDR" ENABLE_PCIESDR LIBPCIESDR_FOUND)
+if(ENABLE_PCIESDR)
+GR_INCLUDE_SUBDIRECTORY(pciesdr)
+endif(ENABLE_PCIESDR)
+
+########################################################################
 # Setup configuration file
 ########################################################################
 ADD_DEFINITIONS(-DHAVE_CONFIG_H=1)

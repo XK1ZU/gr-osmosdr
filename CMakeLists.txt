@@ -22,6 +22,7 @@
 ########################################################################
 cmake_minimum_required(VERSION 2.6)
 project(gr-osmosdr CXX C)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
 enable_testing()
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake/Modules)
@@ -173,6 +174,7 @@ find_package(Volk)
 find_package(LibbladeRF)
 find_package(SoapySDR NO_MODULE)
 find_package(LibFreeSRP)
+find_package(LibPCIeSDR)
 find_package(Doxygen)
 
 if(NOT GNURADIO_RUNTIME_FOUND)
