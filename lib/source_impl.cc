@@ -92,6 +92,10 @@
 #include <freesrp_source_c.h>
 #endif
 
+#ifdef ENABLE_PCIESDR
+#include <pciesdr_source_c.h>
+#endif
+
 #include "arg_helpers.h"
 #include "source_impl.h"
 
@@ -165,6 +169,9 @@ source_impl::source_impl( const std::string &args )
 #endif
 #ifdef ENABLE_FREESRP
   dev_types.push_back("freesrp");
+#endif
+#ifdef ENABLE_PCIESDR
+  dev_types.push_back("pciesdr");
 #endif
   std::cerr << "gr-osmosdr "
             << GR_OSMOSDR_VERSION << " (" << GR_OSMOSDR_LIBVER << ") "
@@ -245,6 +252,11 @@ source_impl::source_impl( const std::string &args )
     BOOST_FOREACH( std::string dev, freesrp_source_c::get_devices() )
       dev_list.push_back( dev );
 #endif
+#ifdef ENABLE_PCIESDR
+    BOOST_FOREACH( std::string dev, pciesdr_source_c::get_devices() )
+      dev_list.push_back( dev );
+#endif
+
 
 //    std::cerr << std::endl;
 //    BOOST_FOREACH( std::string dev, dev_list )
@@ -372,6 +384,13 @@ source_impl::source_impl( const std::string &args )
 #ifdef ENABLE_FREESRP
     if ( dict.count("freesrp") ) {
       freesrp_source_c_sptr src = make_freesrp_source_c( arg );
+      block = src; iface = src.get();
+    }
+#endif
+
+#ifdef ENABLE_PCIESDR
+    if ( dict.count("pciesdr") ) {
+      pciesdr_source_c_sptr src = make_pciesdr_source_c( arg );
       block = src; iface = src.get();
     }
 #endif

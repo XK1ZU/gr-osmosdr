@@ -27,6 +27,7 @@ include_directories(
 )
 
 set(pciesdr_srcs
+    ${CMAKE_CURRENT_SOURCE_DIR}/pciesdr_source_c.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/pciesdr_sink_c.cc
 )
 
