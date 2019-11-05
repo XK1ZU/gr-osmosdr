@@ -120,8 +120,8 @@ private:
 
   void pciesdr_wait();
 
-  static int _usage;
-  static boost::mutex _usage_mutex;
+  static bool _running;
+  static boost::mutex _running_mutex;
 
   MultiSDRState *_dev;
   SDRStartParams StartParams;

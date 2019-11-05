@@ -80,8 +80,8 @@ static inline int pciesdr_stop_tx(MultiSDRState *_dev)
   return msdr_stop(_dev);
 }
 
-int pciesdr_sink_c::_usage = 0;
-boost::mutex pciesdr_sink_c::_usage_mutex;
+bool pciesdr_sink_c::_running = 0;
+boost::mutex pciesdr_sink_c::_running_mutex;
 
 pciesdr_sink_c_sptr make_pciesdr_sink_c (const std::string & args)
 {
@@ -110,7 +110,6 @@ pciesdr_sink_c::pciesdr_sink_c (const std::string &args)
         gr::io_signature::make(MIN_IN, MAX_IN, sizeof (gr_complex)),
         gr::io_signature::make(MIN_OUT, MAX_OUT, sizeof (gr_complex))),
     _dev(NULL),
-    //_buf(NULL),
     _sample_rate(0),
     _center_freq(0),
     _freq_corr(false),
@@ -119,8 +118,8 @@ pciesdr_sink_c::pciesdr_sink_c (const std::string &args)
     _vga_gain(0),
     _bandwidth(0)
 {
-  std::cerr << "pciesdr_sink_c::pciesdr_sink_c " << std::endl;
 
+  int chan = 0;
   std::string pciesdr_args;
   dict_t dict = params_to_dict(args);
 
@@ -129,8 +128,6 @@ pciesdr_sink_c::pciesdr_sink_c (const std::string &args)
     // remove last bracket
     pciesdr_args = pciesdr_args.substr(0, pciesdr_args.find_last_of(']'));
   }
-
-  std::cerr << pciesdr_args << std::endl;
 
   timestamp_tx = 0;
 
@@ -147,26 +144,32 @@ pciesdr_sink_c::pciesdr_sink_c (const std::string &args)
   StartParams.sync_source = SDR_SYNC_NONE;
   StartParams.clock_source = SDR_CLOCK_INTERNAL;
 
-  StartParams.sample_rate_num[0] = 1.5e6;
-  StartParams.sample_rate_den[0] = 1;
-  StartParams.tx_freq[0] = 1500e6;
-  StartParams.rx_freq[0] = 1500e6;
+  StartParams.sample_rate_num[chan] = 1.5e6;
+  StartParams.sample_rate_den[chan] = 1;
+  StartParams.tx_freq[chan] = 1500e6;
+  StartParams.rx_freq[chan] = 1500e6;
 
   StartParams.rx_channel_count = 1;
   StartParams.tx_channel_count = 1;
-  StartParams.tx_gain[0] = 40;
-  StartParams.tx_bandwidth[0] = 1e4;
+  StartParams.tx_gain[chan] = 40;
+  StartParams.tx_bandwidth[chan] = 1e4;
   StartParams.rf_port_count = 1;
-  StartParams.tx_port_channel_count[0] = 1;
-  StartParams.rx_port_channel_count[0] = 1;
+  StartParams.tx_port_channel_count[chan] = 1;
+  StartParams.rx_port_channel_count[chan] = 1;
 
-  set_center_freq( (get_freq_range().start() + get_freq_range().stop()) / 2.0 );
-  set_sample_rate( get_sample_rates().start() );
-  //set_bandwidth( 0 );
+  set_center_freq((get_freq_range().start() + get_freq_range().stop()) / 2.0 );
+  set_sample_rate(get_sample_rates().start());
+  set_bandwidth(0);
 
-  //set_gain( 0 ); /* disable AMP gain stage by default to protect full sprectrum pre-amp from physical damage */
+  set_gain(0); /* disable AMP gain stage by default to protect full sprectrum pre-amp from physical damage */
 
   //set_if_gain( 16 ); /* preset to a reasonable default (non-GRC use case) */
+
+  {
+    boost::mutex::scoped_lock lock(_running_mutex);
+
+    _running = 0;
+  }
 
 }
 
@@ -178,12 +181,10 @@ pciesdr_sink_c::~pciesdr_sink_c ()
   if (_dev) {
     pciesdr_close(_dev);
   }
-
 }
 
 int pciesdr_sink_c::pciesdr_set_freq(MultiSDRState *_dev, uint64_t corr_freq)
 {
-  std::cerr << "pciesdr_set_freq " << corr_freq << std::endl;
   if (corr_freq < 70e6 || corr_freq > 6000e6) {
     std::cerr << "pciesdr_set_freq freq is out of range" << std::endl;
     return 1;
@@ -194,6 +195,8 @@ int pciesdr_sink_c::pciesdr_set_freq(MultiSDRState *_dev, uint64_t corr_freq)
 
 int pciesdr_sink_c::pciesdr_set_sample_rate(MultiSDRState *_dev, double rate)
 {
+  int chan = 0;
+
   if (rate < 400e3 || rate > 25e6) {
     std::cerr << "pciesdr_set_sample_rate: sample rate is out of range" << std::endl;
     return 1;
@@ -208,40 +211,26 @@ int pciesdr_sink_c::pciesdr_set_sample_rate(MultiSDRState *_dev, double rate)
   long denominator = precision / gcd_;
   long numerator = round(frac * precision) / gcd_;
   
-  std::cout << integral * denominator + numerator << " / " << denominator << std::endl;
-  StartParams.sample_rate_num[0] = (int64_t)(integral * denominator + numerator);
-  StartParams.sample_rate_den[0] = denominator;
+  StartParams.sample_rate_num[chan] = (int64_t)(integral * denominator + numerator);
+  StartParams.sample_rate_den[chan] = denominator;
 
   return 0;
-}
-
-void pciesdr_sink_c::_pciesdr_wait(pciesdr_sink_c *obj)
-{
-  obj->pciesdr_wait();
-}
-
-void pciesdr_sink_c::pciesdr_wait()
-{
 }
 
 bool pciesdr_sink_c::start()
 {
   int ret;
   SDRStats stats;
-  SDRStartParams StartParams_tmp = this->StartParams;
 
-  std::cerr << "pciesdr_sink_c::start f: " << StartParams_tmp.tx_freq[0] << std::endl;
-  std::cerr << "pciesdr_sink_c::start n: " << StartParams_tmp.sample_rate_num[0] << std::endl;
-  std::cerr << "pciesdr_sink_c::start d: " << StartParams_tmp.sample_rate_den[0] << std::endl;
-  if ( ! _dev )
+  if (! _dev)
     return false;
 
-  ret = msdr_start(_dev, &StartParams_tmp);
+  ret = msdr_start(_dev, &StartParams);
   if (ret) {
     std::cerr << "Failed to start TX streaming" << std::endl;
     return false;
   }
-  std::cerr << "msdr_start:started" << std::endl;
+
   ret = msdr_get_stats(_dev, &stats);
   if (ret) {
     std::cerr << "msdr_get_stats failed" << std::endl;
@@ -249,28 +238,34 @@ bool pciesdr_sink_c::start()
   }
 
   timestamp_tx = 0;
+
+  {
+    boost::mutex::scoped_lock lock(_running_mutex);
+
+    _running = 1;
+  }
+
   return true;
 }
 
 bool pciesdr_sink_c::stop()
 {
-  if ( ! _dev )
+  if (! _dev)
     return false;
 
-  int ret = pciesdr_stop_tx( _dev );
+  int ret = pciesdr_stop_tx(_dev);
   if (ret) {
     std::cerr << "Failed to stop TX streaming (" << ret << ")" << std::endl;
     return false;
   }
 
-  return true;
-}
+  {
+    boost::mutex::scoped_lock lock(_running_mutex);
 
-void convert_default(float* inbuf, int8_t* outbuf,const unsigned int count)
-{
-  for(unsigned int i=0; i<count;i++){
-    outbuf[i]= inbuf[i]*127;
+    _running = 0;
   }
+
+  return true;
 }
 
 int pciesdr_sink_c::work( int noutput_items,
@@ -280,11 +275,10 @@ int pciesdr_sink_c::work( int noutput_items,
   int chan = 0;
   int rc;
   int64_t hw_time;
-  int64_t timestamp_tmp = 0;
 
   if (!timestamp_tx) {
     // get current tx timestamp from SDR
-    rc = msdr_write(_dev, timestamp_tmp, (const void**)NULL, 0, 0, &hw_time);
+    rc = msdr_write(_dev, 0, (const void**)NULL, 0, 0, &hw_time);
     if (rc < 0) {
       std::cerr << "Failed write into TX stream" << std::endl;
       return 0;
@@ -292,8 +286,7 @@ int pciesdr_sink_c::work( int noutput_items,
     timestamp_tx = hw_time;
   }
 
-  static sample_t *psamples = (sample_t *) input_items[0];
-  rc = msdr_write(_dev, timestamp_tx, (const void**)&psamples, noutput_items, chan, &hw_time);
+  rc = msdr_write(_dev, timestamp_tx, (const void**)&input_items[0], noutput_items, chan, &hw_time);
   if (rc < 0) {
     std::cerr << "Failed write into TX stream" << std::endl;
     return 0;
@@ -308,7 +301,7 @@ std::vector<std::string> pciesdr_sink_c::get_devices()
 {
   std::vector<std::string> devices;
   std::string label;
-  devices.push_back( "dev0=/dev/sdr2" );
+  devices.push_back("dev0=/dev/sdr0");
 
   return devices;
 }
@@ -359,7 +352,7 @@ osmosdr::freq_range_t pciesdr_sink_c::get_freq_range( size_t chan )
 {
   osmosdr::freq_range_t range;
 
-  range += osmosdr::range_t( _sample_rate / 2, 7250e6 - _sample_rate / 2 );
+  range.push_back(osmosdr::range_t(70e6, 6000e6));
 
   return range;
 }
@@ -373,7 +366,7 @@ double pciesdr_sink_c::set_center_freq( double freq, size_t chan )
   if (_dev) {
     double corr_freq = APPLY_PPM_CORR( freq, _freq_corr );
     ret = pciesdr_set_freq( _dev, uint64_t(corr_freq) );
-    if ( HACKRF_SUCCESS == ret ) {
+    if (!ret) {
       _center_freq = freq;
     }
   }
@@ -418,11 +411,11 @@ osmosdr::gain_range_t pciesdr_sink_c::get_gain_range( size_t chan )
 osmosdr::gain_range_t pciesdr_sink_c::get_gain_range( const std::string & name, size_t chan )
 {
   if ( "RF" == name ) {
-    return osmosdr::gain_range_t( 0, 14, 14 );
+    return osmosdr::gain_range_t(0, 90);
   }
 
   if ( "IF" == name ) {
-    return osmosdr::gain_range_t( 0, 47, 1 );
+    return osmosdr::gain_range_t(0, 90);
   }
 
   return osmosdr::gain_range_t();
@@ -442,22 +435,23 @@ bool pciesdr_sink_c::get_gain_mode( size_t chan )
 
 double pciesdr_sink_c::set_gain( double gain, size_t chan )
 {
-  int ret;
-  osmosdr::gain_range_t rf_gains = get_gain_range( "RF", chan );
+  int ret = 0;
 
-  if (_dev) {
-    double clip_gain = rf_gains.clip( gain, true );
-    uint8_t value = clip_gain == 14.0f ? 1 : 0;
-/*
-    ret = pciesdr_set_amp_enable( _dev, value );
-    if ( HACKRF_SUCCESS == ret ) {
-      _amp_gain = clip_gain;
+  StartParams.tx_gain[chan] = gain;
+
+  {
+    boost::mutex::scoped_lock lock(_running_mutex);
+
+    if (_running) {
+      ret = msdr_set_tx_gain(_dev, chan, StartParams.tx_gain[chan]);
     }
-*/
-ret = 0;
   }
 
-  return _amp_gain;
+  if (ret) {
+    std::cerr << "Failed to set TX gain (" << ret << "), chan: " << chan << std::endl;
+  }
+
+  return get_gain(chan);
 }
 
 double pciesdr_sink_c::set_gain( double gain, const std::string & name, size_t chan)
@@ -475,7 +469,17 @@ double pciesdr_sink_c::set_gain( double gain, const std::string & name, size_t c
 
 double pciesdr_sink_c::get_gain( size_t chan )
 {
-  return _amp_gain;
+  double gain = StartParams.tx_gain[chan];
+
+  {
+    boost::mutex::scoped_lock lock(_running_mutex);
+
+    if (_running) {
+      gain = msdr_get_tx_gain(_dev, chan);
+    }
+  }
+
+  return gain;
 }
 
 double pciesdr_sink_c::get_gain( const std::string & name, size_t chan )
@@ -485,7 +489,7 @@ double pciesdr_sink_c::get_gain( const std::string & name, size_t chan )
   }
 
   if ( "IF" == name ) {
-    return _vga_gain;
+    return get_gain( chan );
   }
 
   return get_gain( chan );
@@ -493,20 +497,7 @@ double pciesdr_sink_c::get_gain( const std::string & name, size_t chan )
 
 double pciesdr_sink_c::set_if_gain( double gain, size_t chan )
 {
-  int ret;
   osmosdr::gain_range_t if_gains = get_gain_range( "IF", chan );
-
-  if (_dev) {
-    double clip_gain = if_gains.clip( gain, true );
-/*
-    ret = pciesdr_set_txvga_gain( _dev, uint32_t(clip_gain) );
-    if ( HACKRF_SUCCESS == ret ) {
-      _vga_gain = clip_gain;
-    } else {
-      HACKRF_THROW_ON_ERROR( ret, HACKRF_FUNC_STR( "pciesdr_set_txvga_gain", clip_gain ) )
-    }
-*/
-  }
 
   return _vga_gain;
 }
@@ -537,31 +528,18 @@ std::string pciesdr_sink_c::get_antenna( size_t chan )
 
 double pciesdr_sink_c::set_bandwidth( double bandwidth, size_t chan )
 {
-//  osmosdr::freq_range_t bandwidths = get_bandwidth_range( chan );
-
-  if ( bandwidth == 0.0 ) /* bandwidth of 0 means automatic filter selection */
+  if (bandwidth == 0.0) /* bandwidth of 0 means automatic filter selection */
     bandwidth = _sample_rate * 0.75; /* select narrower filters to prevent aliasing */
 
- // if ( _dev ) {
-    /* compute best default value depending on sample rate (auto filter) */
-    //uint32_t bw = pciesdr_compute_baseband_filter_bw( uint32_t(bandwidth) );
-    
-    //ret = pciesdr_set_baseband_filter_bandwidth( _dev, bw );
-/*
-    if ( HACKRF_SUCCESS == ret ) {
-      _bandwidth = bw;
-    } else {
-      HACKRF_THROW_ON_ERROR( ret, HACKRF_FUNC_STR( "pciesdr_set_baseband_filter_bandwidth", bw ) )
-    }
-  }
-*/
-  _bandwidth = 1e6;
+  StartParams.tx_bandwidth[chan] = bandwidth;
+  _bandwidth = get_bandwidth(chan);
+
   return _bandwidth;
 }
 
 double pciesdr_sink_c::get_bandwidth( size_t chan )
 {
-  return _bandwidth;
+  return StartParams.tx_bandwidth[chan];
 }
 
 osmosdr::freq_range_t pciesdr_sink_c::get_bandwidth_range( size_t chan )
