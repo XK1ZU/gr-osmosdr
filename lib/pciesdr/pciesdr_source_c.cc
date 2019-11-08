@@ -46,10 +46,6 @@
 
 using namespace boost::assign;
 
-#define BUF_LEN  (16 * 32 * 512) /* must be multiple of 512 */
-#define BUF_NUM   15
-#define HACKRF_SUCCESS 0
-
 static long gcd(long a, long b)
 {
   if (a == 0)
@@ -118,6 +114,7 @@ pciesdr_source_c::pciesdr_source_c (const std::string &args)
 {
 
   int chan = 0;
+  int rf_port = 0;
   std::string pciesdr_args;
   dict_t dict = params_to_dict(args);
 
@@ -138,12 +135,15 @@ pciesdr_source_c::pciesdr_source_c (const std::string &args)
   // prefil startup parameters
   msdr_set_default_start_params(_dev, &StartParams);
 
-  StartParams.interface_type = SDR_INTERFACE_RF;
-  StartParams.sync_source = SDR_SYNC_NONE;
-  StartParams.clock_source = SDR_CLOCK_INTERNAL;
+  StartParams.interface_type = SDR_INTERFACE_RF; /* RF interface */
+  StartParams.sync_source = SDR_SYNC_NONE; /* no time synchronisation */
+  StartParams.clock_source = SDR_CLOCK_INTERNAL; /* internal clock, using PPS to correct it */
 
-  StartParams.sample_rate_num[chan] = 1.5e6;
-  StartParams.sample_rate_den[chan] = 1;
+  StartParams.rx_sample_fmt = SDR_SAMPLE_FMT_CF32; /* complex float32 */
+  StartParams.rx_sample_hw_fmt = SDR_SAMPLE_HW_FMT_AUTO; /* choose best format fitting the bandwidth */
+
+  StartParams.sample_rate_num[rf_port] = 1.5e6;
+  StartParams.sample_rate_den[rf_port] = 1;
   StartParams.tx_freq[chan] = 1500e6;
   StartParams.rx_freq[chan] = 1500e6;
 
@@ -152,8 +152,11 @@ pciesdr_source_c::pciesdr_source_c (const std::string &args)
   StartParams.rx_gain[chan] = 40;
   StartParams.rx_bandwidth[chan] = 1e4;
   StartParams.rf_port_count = 1;
-  StartParams.tx_port_channel_count[chan] = 1;
-  StartParams.rx_port_channel_count[chan] = 1;
+  StartParams.tx_port_channel_count[rf_port] = 1;
+  StartParams.rx_port_channel_count[rf_port] = 1;
+  /* if != 0, set a custom DMA buffer configuration. Otherwise the default is 150 buffers per 10 ms */
+  StartParams.dma_buffer_count = 0;
+  StartParams.dma_buffer_len = 1000; /* in samples */
 
   set_center_freq((get_freq_range().start() + get_freq_range().stop()) / 2.0 );
   set_sample_rate(get_sample_rates().start());
@@ -272,12 +275,21 @@ int pciesdr_source_c::work( int noutput_items,
 {
   int chan = 0;
   int rc;
+  SDRStats stats;
+  int64_t timestamp_tmp = 0;
 
-  rc = msdr_read(_dev, &timestamp_rx, (void**)&output_items[0], noutput_items, chan, 100); 
+  rc = msdr_read(_dev, &timestamp_tmp, (void**)&output_items[0], noutput_items, chan, 100); 
   if (rc < 0) {
-    std::cerr << "Failed read from RX stream rc:" << rc << std::endl;
+    std::cerr << "Failed read from RX stream rc:" << rc << " noutput_items:" << noutput_items << std::endl;
+    std::cerr << "timestamp_rx:" << timestamp_rx << " timestamp_tmp:" << timestamp_tmp << std::endl;
+    if (msdr_get_stats(_dev, &stats)) {
+      std::cerr << "Failed get_stats" << std::endl;
+    } else {
+      std::cerr << "tx_underflow_count:" << stats.tx_underflow_count << " rx_overflow_count:" << stats.rx_overflow_count << std::endl;
+    }
     return 0;
   }
+  timestamp_rx = timestamp_tmp;
 
   // Tell runtime system how many output items we produced.
 
@@ -306,11 +318,7 @@ osmosdr::meta_range_t pciesdr_source_c::get_sample_rates()
    * the user is allowed to request arbitrary (fractional) rates within these
    * boundaries. */
 
-  range += osmosdr::range_t( 400e3 );
-  range += osmosdr::range_t( 500e3 );
-  range += osmosdr::range_t( 1.0e6 );
-  range += osmosdr::range_t( 1.5e6 );
-  range += osmosdr::range_t( 2.0e6 ); /* confirmed to work on fast machines */
+  range += osmosdr::range_t(400e3, 20e6);
 
   return range;
 }
@@ -533,24 +541,9 @@ osmosdr::freq_range_t pciesdr_source_c::get_bandwidth_range( size_t chan )
 {
   osmosdr::freq_range_t bandwidths;
 
-  // TODO: read out from libhackrf when an API is available
+  // TODO: do this properly
 
-  bandwidths += osmosdr::range_t( 1750000 );
-  bandwidths += osmosdr::range_t( 2500000 );
-  bandwidths += osmosdr::range_t( 3500000 );
-  bandwidths += osmosdr::range_t( 5000000 );
-  bandwidths += osmosdr::range_t( 5500000 );
-  bandwidths += osmosdr::range_t( 6000000 );
-  bandwidths += osmosdr::range_t( 7000000 );
-  bandwidths += osmosdr::range_t( 8000000 );
-  bandwidths += osmosdr::range_t( 9000000 );
-  bandwidths += osmosdr::range_t( 10000000 );
-  bandwidths += osmosdr::range_t( 12000000 );
-  bandwidths += osmosdr::range_t( 14000000 );
-  bandwidths += osmosdr::range_t( 15000000 );
-  bandwidths += osmosdr::range_t( 20000000 );
-  bandwidths += osmosdr::range_t( 24000000 );
-  bandwidths += osmosdr::range_t( 28000000 );
+  bandwidths += osmosdr::range_t(400e3, 20e6);
 
   return bandwidths;
 }

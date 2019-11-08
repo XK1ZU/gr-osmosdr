@@ -131,6 +131,9 @@ private:
   } sample_t;
 
   int64_t timestamp_tx;
+  int64_t hw_time;
+  int64_t tx_underflow;
+  int64_t throttling_treshold;
 
   double _sample_rate;
   double _center_freq;

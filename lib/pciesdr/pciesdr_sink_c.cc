@@ -46,12 +46,6 @@
 
 using namespace boost::assign;
 
-#define BUF_LEN  (16 * 32 * 512) /* must be multiple of 512 */
-#define BUF_NUM   15
-#define HACKRF_SUCCESS 0
-
-#define BYTES_PER_SAMPLE  2 /* HackRF device consumes 8 bit unsigned IQ data */
-
 static long gcd(long a, long b)
 {
   if (a == 0)
@@ -120,6 +114,7 @@ pciesdr_sink_c::pciesdr_sink_c (const std::string &args)
 {
 
   int chan = 0;
+  int rf_port = 0;
   std::string pciesdr_args;
   dict_t dict = params_to_dict(args);
 
@@ -140,12 +135,15 @@ pciesdr_sink_c::pciesdr_sink_c (const std::string &args)
   // prefil startup parameters
   msdr_set_default_start_params(_dev, &StartParams);
 
-  StartParams.interface_type = SDR_INTERFACE_RF;
-  StartParams.sync_source = SDR_SYNC_NONE;
-  StartParams.clock_source = SDR_CLOCK_INTERNAL;
+  StartParams.interface_type = SDR_INTERFACE_RF; /* RF interface */
+  StartParams.sync_source = SDR_SYNC_NONE; /* no time synchronisation */
+  StartParams.clock_source = SDR_CLOCK_INTERNAL; /* internal clock, using PPS to correct it */
 
-  StartParams.sample_rate_num[chan] = 1.5e6;
-  StartParams.sample_rate_den[chan] = 1;
+  StartParams.rx_sample_fmt = SDR_SAMPLE_FMT_CF32; /* complex float32 */
+  StartParams.rx_sample_hw_fmt = SDR_SAMPLE_HW_FMT_AUTO; /* choose best format fitting the bandwidth */
+
+  StartParams.sample_rate_num[rf_port] = 1.5e6;
+  StartParams.sample_rate_den[rf_port] = 1;
   StartParams.tx_freq[chan] = 1500e6;
   StartParams.rx_freq[chan] = 1500e6;
 
@@ -154,8 +152,11 @@ pciesdr_sink_c::pciesdr_sink_c (const std::string &args)
   StartParams.tx_gain[chan] = 40;
   StartParams.tx_bandwidth[chan] = 1e4;
   StartParams.rf_port_count = 1;
-  StartParams.tx_port_channel_count[chan] = 1;
-  StartParams.rx_port_channel_count[chan] = 1;
+  StartParams.tx_port_channel_count[rf_port] = 1;
+  StartParams.rx_port_channel_count[rf_port] = 1;
+  /* if != 0, set a custom DMA buffer configuration. Otherwise the default is 150 buffers per 10 ms */
+  StartParams.dma_buffer_count = 0;
+  StartParams.dma_buffer_len = 1000; /* in samples */
 
   set_center_freq((get_freq_range().start() + get_freq_range().stop()) / 2.0 );
   set_sample_rate(get_sample_rates().start());
@@ -214,6 +215,8 @@ int pciesdr_sink_c::pciesdr_set_sample_rate(MultiSDRState *_dev, double rate)
   StartParams.sample_rate_num[chan] = (int64_t)(integral * denominator + numerator);
   StartParams.sample_rate_den[chan] = denominator;
 
+  throttling_treshold = 4000 * 1e-6 * StartParams.sample_rate_num[chan] / StartParams.sample_rate_den[chan];
+
   return 0;
 }
 
@@ -238,6 +241,8 @@ bool pciesdr_sink_c::start()
   }
 
   timestamp_tx = 0;
+  hw_time = 0;
+  tx_underflow = 0;
 
   {
     boost::mutex::scoped_lock lock(_running_mutex);
@@ -274,24 +279,72 @@ int pciesdr_sink_c::work( int noutput_items,
 {
   int chan = 0;
   int rc;
-  int64_t hw_time;
+  SDRStats stats;
+  int noutput_items_tmp = noutput_items;
+  int64_t hw_time_tmp = 0;
 
   if (!timestamp_tx) {
     // get current tx timestamp from SDR
-    rc = msdr_write(_dev, 0, (const void**)NULL, 0, 0, &hw_time);
+    rc = msdr_write(_dev, 0, (const void**)NULL, 0, 0, &hw_time_tmp);
     if (rc < 0) {
       std::cerr << "Failed write into TX stream" << std::endl;
       return 0;
     }
-    timestamp_tx = hw_time;
+    hw_time = hw_time_tmp;
+    timestamp_tx = hw_time + throttling_treshold / 4;
   }
 
-  rc = msdr_write(_dev, timestamp_tx, (const void**)&input_items[0], noutput_items, chan, &hw_time);
+  /*
+   * How do you tell the GNU Radio stack to slow down correctly?
+   * Attempted throttling.
+  */ 
+  if (timestamp_tx - hw_time > throttling_treshold) {
+    if (msdr_get_stats(_dev, &stats)) {
+      std::cerr << "Failed get_stats" << std::endl;
+    } else if (stats.tx_underflow_count > tx_underflow){
+      tx_underflow = stats.tx_underflow_count;
+      std::cerr << "tx_underflow_count:" << stats.tx_underflow_count << " rx_overflow_count:" << stats.rx_overflow_count << std::endl;
+    }
+    // update hw_time
+    rc = msdr_write(_dev, timestamp_tx, (const void**)NULL, 0, 0, &hw_time_tmp);
+    if (rc < 0) {
+      std::cerr << "Failed write into TX stream" << std::endl;
+      return 0;
+    }
+    hw_time = hw_time_tmp;
+    if (noutput_items < 1) {
+      return noutput_items;
+    }
+    if (timestamp_tx - hw_time > throttling_treshold) {
+      noutput_items_tmp = noutput_items - (timestamp_tx - hw_time - throttling_treshold);
+      if (noutput_items_tmp < 0) {
+        noutput_items_tmp = noutput_items;
+        double wait_for_us = 1e6 * (timestamp_tx - hw_time - throttling_treshold) * StartParams.sample_rate_den[chan] / StartParams.sample_rate_num[chan];
+        if (wait_for_us > 800) {
+          wait_for_us = wait_for_us * 0.75;
+          /*
+          std::cerr << "timestamp_tx:" << timestamp_tx << " is ahead hw_time:" << hw_time << " more than:" << throttling_treshold
+                    << " wait fo us:" << wait_for_us << std::endl;
+          */
+          usleep((unsigned int)wait_for_us);
+        }
+      }
+    }
+  }
+
+  rc = msdr_write(_dev, timestamp_tx, (const void**)&input_items[0], noutput_items_tmp, chan, &hw_time_tmp);
   if (rc < 0) {
     std::cerr << "Failed write into TX stream" << std::endl;
     return 0;
   }
+  hw_time = hw_time_tmp;
   timestamp_tx += rc;
+  /*
+  // Hw is ahead of sample delivery
+  if (hw_time > timestamp_tx) {
+    std::cerr << "hw_time:" << hw_time << " is ahead timestamp_tx:" << timestamp_tx << std::endl;
+  }
+  */
   // Tell runtime system how many output items we produced.
 
   return rc;
@@ -319,11 +372,7 @@ osmosdr::meta_range_t pciesdr_sink_c::get_sample_rates()
    * the user is allowed to request arbitrary (fractional) rates within these
    * boundaries. */
 
-  range += osmosdr::range_t( 400e3 );
-  range += osmosdr::range_t( 500e3 );
-  range += osmosdr::range_t( 1.0e6 );
-  range += osmosdr::range_t( 1.5e6 );
-  range += osmosdr::range_t( 2.0e6 ); /* confirmed to work on fast machines */
+  range += osmosdr::range_t(400e3, 20e6);
 
   return range;
 }
@@ -546,24 +595,9 @@ osmosdr::freq_range_t pciesdr_sink_c::get_bandwidth_range( size_t chan )
 {
   osmosdr::freq_range_t bandwidths;
 
-  // TODO: read out from libhackrf when an API is available
+  // TODO: do this properly
 
-  bandwidths += osmosdr::range_t( 1750000 );
-  bandwidths += osmosdr::range_t( 2500000 );
-  bandwidths += osmosdr::range_t( 3500000 );
-  bandwidths += osmosdr::range_t( 5000000 );
-  bandwidths += osmosdr::range_t( 5500000 );
-  bandwidths += osmosdr::range_t( 6000000 );
-  bandwidths += osmosdr::range_t( 7000000 );
-  bandwidths += osmosdr::range_t( 8000000 );
-  bandwidths += osmosdr::range_t( 9000000 );
-  bandwidths += osmosdr::range_t( 10000000 );
-  bandwidths += osmosdr::range_t( 12000000 );
-  bandwidths += osmosdr::range_t( 14000000 );
-  bandwidths += osmosdr::range_t( 15000000 );
-  bandwidths += osmosdr::range_t( 20000000 );
-  bandwidths += osmosdr::range_t( 24000000 );
-  bandwidths += osmosdr::range_t( 28000000 );
+  bandwidths += osmosdr::range_t(400e3, 20e6);
 
   return bandwidths;
 }
