@@ -278,10 +278,13 @@ int pciesdr_sink_c::work( int noutput_items,
                          gr_vector_void_star &output_items )
 {
   int chan = 0;
+  int chan_count = 1;
   int rc;
+  int i;
   SDRStats stats;
   int noutput_items_tmp = noutput_items;
   int64_t hw_time_tmp = 0;
+  sample_t *tx_samples_by_chan[SDR_MAX_CHANNELS];
 
   if (!timestamp_tx) {
     // get current tx timestamp from SDR
@@ -292,6 +295,12 @@ int pciesdr_sink_c::work( int noutput_items,
     }
     hw_time = hw_time_tmp;
     timestamp_tx = hw_time + throttling_treshold / 4;
+  }
+  for (i = 0; i < chan_count; i++) {
+  /*
+   *TODO: check sample buffer address alignment (alignment should be 32B)
+  */
+    tx_samples_by_chan[i] = (sample_t*)input_items[i];
   }
 
   /*
@@ -332,7 +341,7 @@ int pciesdr_sink_c::work( int noutput_items,
     }
   }
 
-  rc = msdr_write(_dev, timestamp_tx, (const void**)&input_items[0], noutput_items_tmp, chan, &hw_time_tmp);
+  rc = msdr_write(_dev, timestamp_tx, (const void**)tx_samples_by_chan, noutput_items_tmp, chan, &hw_time_tmp);
   if (rc < 0) {
     std::cerr << "Failed write into TX stream" << std::endl;
     return 0;

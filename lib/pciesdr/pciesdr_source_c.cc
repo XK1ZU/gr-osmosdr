@@ -274,11 +274,20 @@ int pciesdr_source_c::work( int noutput_items,
                          gr_vector_void_star &output_items )
 {
   int chan = 0;
+  int chan_count = 1;
   int rc;
+  int i;
   SDRStats stats;
   int64_t timestamp_tmp = 0;
+  sample_t *rx_samples_by_chan[SDR_MAX_CHANNELS];
 
-  rc = msdr_read(_dev, &timestamp_tmp, (void**)&output_items[0], noutput_items, chan, 100); 
+  for (i = 0; i < chan_count; i++) {
+  /*
+   *TODO: check sample buffer address alignment (alignment should be 32B)
+  */
+    rx_samples_by_chan[i] = (sample_t*)output_items[i];
+  }
+  rc = msdr_read(_dev, &timestamp_tmp, (void**)rx_samples_by_chan, noutput_items, chan, 100); 
   if (rc < 0) {
     std::cerr << "Failed read from RX stream rc:" << rc << " noutput_items:" << noutput_items << std::endl;
     std::cerr << "timestamp_rx:" << timestamp_rx << " timestamp_tmp:" << timestamp_tmp << std::endl;
